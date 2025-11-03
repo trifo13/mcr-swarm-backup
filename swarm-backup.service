@@ -3,7 +3,7 @@ Description=Swarm backup (non-leader only)
 Requires=docker.service
 After=network-online.target docker.service
 RequiresMountsFor=/backup/swarm
-ConditionPathIsMountPoint=/backup/swarm
+ConditionPathIsMountPoint=/backup
 
 [Service]
 Type=oneshot

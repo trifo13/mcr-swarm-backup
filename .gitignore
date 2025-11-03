@@ -1,0 +1,4 @@
+# Avoid committing generated stuff
+*.tgz
+*.log
+*.bak.*

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily swarm backup (non-leader only)
+
+[Timer]
+OnCalendar=03:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=swarm-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -31,6 +31,72 @@ USAGE
 
 log() { printf '[%s] %s\n' "$(date -Is)" "$*"; }
 
+SVC_TIMEOUT="${SVC_TIMEOUT:-120}"   # seconds to wait for stop/start
+
+svc_exists() { systemctl list-unit-files 2>/dev/null | grep -q "^$1"; }
+
+wait_until_inactive() {  # $1=unit
+  local t="$SVC_TIMEOUT"
+  while systemctl is-active --quiet "$1" 2>/dev/null; do
+    ((t--)) || { log "timeout stopping $1"; return 1; }
+    sleep 1
+  done
+  return 0
+}
+
+wait_until_active() {  # $1=unit
+  local t="$SVC_TIMEOUT"
+  while ! systemctl is-active --quiet "$1" 2>/dev/null; do
+    ((t--)) || { log "timeout starting $1"; return 1; }
+    sleep 1
+  done
+  return 0
+}
+
+stop_stack() {
+  QUIESCED=0
+  # Stop Docker first (it may also stop containerd via deps)
+  if svc_exists docker.service && systemctl is-active --quiet docker.service; then
+    log "stopping docker.service"
+    systemctl stop docker.service
+    wait_until_inactive docker.service || return 1
+    QUIESCED=1
+  fi
+  # Then containerd if it still exists/active
+  if svc_exists containerd.service && systemctl is-active --quiet containerd.service; then
+    log "stopping containerd.service"
+    systemctl stop containerd.service
+    wait_until_inactive containerd.service || return 1
+    QUIESCED=1
+  fi
+  return 0
+}
+
+start_stack() {
+  # Start containerd first (if present)
+  if svc_exists containerd.service && ! systemctl is-active --quiet containerd.service; then
+    log "starting containerd.service"
+    systemctl start containerd.service
+    wait_until_active containerd.service || return 1
+  fi
+  # Then Docker
+  if svc_exists docker.service && ! systemctl is-active --quiet docker.service; then
+    log "starting docker.service"
+    systemctl start docker.service
+    wait_until_active docker.service || return 1
+  fi
+  # Sanity: docker CLI healthy
+  if command -v docker >/dev/null 2>&1; then
+    local t=60
+    until docker info >/dev/null 2>&1; do
+      ((t--)) || { log "docker did not become healthy in time"; return 1; }
+      sleep 1
+    done
+  fi
+  log "docker is up and healthy"
+  return 0
+}
+
 # ---------- CLI parsing (CLI > config > defaults) ----------
 OPT_CONF="" OPT_BACKUP_DIR="" OPT_KEEP=""
 while getopts ":c:d:k:h" opt; do
@@ -120,10 +186,25 @@ if mkdir "$LOCKDIR" 2>/dev/null; then
     log "source dir $SRC not found"; exit 1
   fi
 
-  # ---------- Backup ----------
-  log "creating archive: $ARCHIVE"
-  tar cvzf "$ARCHIVE" "$SRC"
-  log "backup complete: $ARCHIVE"
+# ---------- Quiesce, Backup, Restore ----------
+log "quiescing docker/containerd for consistent snapshot"
+stop_stack || { log "failed to stop services safely"; exit 1; }
+
+# Ensure we always try to bring services back if we quiesced
+restore_services() {
+  if [[ "${QUIESCED:-0}" == "1" ]]; then
+    log "restoring services after backup (or on error)"
+    start_stack || log "WARNING: failed to restart services; manual check required"
+  fi
+}
+trap restore_services EXIT
+
+log "creating archive: $ARCHIVE"
+tar cvzf "$ARCHIVE" "$SRC"
+log "backup complete: $ARCHIVE"
+
+# Start services now (trap is a safety net)
+start_stack || { log "failed to restart services"; exit 1; }
 
   # ---------- Retention ----------
   if compgen -G "${BACKUP_DIR}/swarm-*.tgz" > /dev/null; then
